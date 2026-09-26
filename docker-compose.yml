@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fate
+      POSTGRES_PASSWORD: fate
+      POSTGRES_DB: fate_bot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://fate:fate@db:5432/fate_bot?schema=public
+    profiles: ["full"]
+
+volumes:
+  pgdata:

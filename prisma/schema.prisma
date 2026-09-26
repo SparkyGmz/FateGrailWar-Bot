@@ -1,0 +1,711 @@
+// =====================================================================
+//  Fate: Holy Grail War RPG — schema V0.1
+//  Conteúdo (Servants, classes, itens, banners) é data-driven: vive
+//  nestas tabelas e é populado por prisma/seed.ts a partir de prisma/data.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// Jogador (Master)
+// ---------------------------------------------------------------------
+
+model User {
+  /// Discord User ID — identificador principal
+  id       String @id
+  username String
+
+  level  Int @default(1)
+  xp     Int @default(0)
+  coins  Int @default(0)
+  mana   Int @default(0)
+  grails Int @default(0)
+
+  wins       Int @default(0)
+  losses     Int @default(0)
+  warsPlayed Int @default(0) @map("wars_played")
+
+  /// Recurso obtido com Servants duplicados
+  spiritOrigin Int @default(0) @map("spirit_origin")
+
+  totalSummons     Int       @default(0) @map("total_summons")
+  lastFreeSummonAt DateTime? @map("last_free_summon_at")
+
+  /// Título exibido no perfil (chave em player_titles)
+  equippedTitle String? @map("equipped_title")
+
+  favoriteServantId Int?     @map("favorite_servant_id")
+  favoriteServant   Servant? @relation("FavoriteServant", fields: [favoriteServantId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  servants      PlayerServant[]
+  inventory     InventoryItem[]
+  summonHistory SummonHistory[]
+  logs          ActionLog[]
+  titles        PlayerTitle[]
+  missions      PlayerMission[]
+  purchases     ShopPurchase[]
+  warEntries    WarParticipant[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------
+// Classes (data-driven: modificadores de balanceamento ficam em JSON)
+// ---------------------------------------------------------------------
+
+model ServantClass {
+  /// slug: "saber", "archer", ...
+  id          String  @id
+  name        String
+  emoji       String
+  color       Int
+  sortOrder   Int     @default(0) @map("sort_order")
+  description String  @default("")
+  /// Lista de características em texto, exibida ao jogador
+  features    Json    @default("[]")
+  /// Modificadores numéricos usados pelos sistemas (combate, mapa, etc.)
+  modifiers   Json    @default("{}")
+  enabled     Boolean @default(true)
+
+  servants Servant[]
+
+  @@map("servant_classes")
+}
+
+// ---------------------------------------------------------------------
+// Servants
+// ---------------------------------------------------------------------
+
+model Servant {
+  id      Int          @id @default(autoincrement())
+  slug    String       @unique
+  name    String
+  classId String       @map("class_id")
+  class   ServantClass @relation(fields: [classId], references: [id])
+  rarity  Int
+
+  alignment String @default("")
+  gender    String @default("")
+  origin    String @default("")
+  region    String @default("")
+  era       String @default("")
+
+  strength  String
+  endurance String
+  agility   String
+  mana      String
+  luck      String
+  npRank    String @map("np_rank")
+
+  baseHp Int @default(1000) @map("base_hp")
+  baseMp Int @default(100) @map("base_mp")
+
+  traits String[]
+
+  /// Peso base no sorteio. Se nulo, usa o peso padrão da raridade (config/game.ts)
+  summonWeight Int?    @map("summon_weight")
+  description  String  @default("")
+  imageUrl     String? @map("image_url")
+  enabled      Boolean @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  noblePhantasms NoblePhantasm[]
+  skills         ServantSkill[]
+  owners         PlayerServant[]
+  poolEntries    SummonPoolServant[]
+  summonHistory  SummonHistory[]
+  favoritedBy    User[]              @relation("FavoriteServant")
+  bondRewards    BondReward[]
+  warEntries     WarParticipant[]
+
+  @@index([classId])
+  @@map("servants")
+}
+
+model NoblePhantasm {
+  id         Int     @id @default(autoincrement())
+  servantId  Int     @map("servant_id")
+  servant    Servant @relation(fields: [servantId], references: [id], onDelete: Cascade)
+  name       String
+  rank       String
+  type       String  @default("")
+  manaCost   Int     @default(0) @map("mana_cost")
+  targetType String  @default("single_enemy") @map("target_type")
+  /// Efeitos data-driven (usados a partir da V0.4)
+  effects    Json    @default("[]")
+
+  @@unique([servantId, name])
+  @@map("noble_phantasms")
+}
+
+// ---------------------------------------------------------------------
+// Coleção do jogador + Bond
+// ---------------------------------------------------------------------
+
+model PlayerServant {
+  id        Int     @id @default(autoincrement())
+  userId    String  @map("user_id")
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  servantId Int     @map("servant_id")
+  servant   Servant @relation(fields: [servantId], references: [id])
+
+  bondLevel  Int @default(0) @map("bond_level")
+  bondXp     Int @default(0) @map("bond_xp")
+  duplicates Int @default(0)
+
+  timesUsed Int @default(0) @map("times_used")
+  battles   Int @default(0)
+  wins      Int @default(0)
+  kills     Int @default(0)
+
+  obtainedAt DateTime @default(now()) @map("obtained_at")
+
+  missions PlayerMission[]
+
+  @@unique([userId, servantId])
+  @@map("player_servants")
+}
+
+// ---------------------------------------------------------------------
+// Itens / inventário (catalisadores são itens do tipo CATALYST)
+// ---------------------------------------------------------------------
+
+enum ItemType {
+  CATALYST
+  MATERIAL
+  CONSUMABLE
+}
+
+model Item {
+  id          Int      @id @default(autoincrement())
+  slug        String   @unique
+  name        String
+  type        ItemType
+  emoji       String   @default("📦")
+  rarity      Int      @default(1)
+  description String   @default("")
+  /// Para catalisadores: { effects: [{ target, value, multiplier }] }
+  data        Json     @default("{}")
+  /// Peso de drop (0 = nunca cai aleatoriamente)
+  dropWeight  Int      @default(0) @map("drop_weight")
+  enabled     Boolean  @default(true)
+
+  holders     InventoryItem[]
+  shopOffers  ShopOffer[]
+  bondRewards BondReward[]
+
+  @@map("items")
+}
+
+model InventoryItem {
+  userId   String @map("user_id")
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  itemId   Int    @map("item_id")
+  item     Item   @relation(fields: [itemId], references: [id])
+  quantity Int    @default(0)
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@id([userId, itemId])
+  @@map("player_inventory")
+}
+
+// ---------------------------------------------------------------------
+// Banners / pools rotativos
+// ---------------------------------------------------------------------
+
+model SummonPool {
+  id          Int       @id @default(autoincrement())
+  slug        String    @unique
+  name        String
+  description String    @default("")
+  startDate   DateTime  @map("start_date")
+  /// null = sem data de término
+  endDate     DateTime? @map("end_date")
+  /// Entre pools ativos simultaneamente, vence o de maior prioridade
+  priority    Int       @default(0)
+  /// Ex.: { "featuredMultiplier": 3 }
+  rateModifiers Json    @default("{}") @map("rate_modifiers")
+  enabled     Boolean   @default(true)
+  announcedAt DateTime? @map("announced_at")
+
+  servants SummonPoolServant[]
+  history  SummonHistory[]
+
+  @@index([startDate, endDate])
+  @@map("summon_pools")
+}
+
+model SummonPoolServant {
+  poolId         Int        @map("pool_id")
+  pool           SummonPool @relation(fields: [poolId], references: [id], onDelete: Cascade)
+  servantId      Int        @map("servant_id")
+  servant        Servant    @relation(fields: [servantId], references: [id], onDelete: Cascade)
+  featured       Boolean    @default(false)
+  /// Sobrescreve o peso base do Servant neste banner
+  weightOverride Int?       @map("weight_override")
+
+  @@id([poolId, servantId])
+  @@map("summon_pool_servants")
+}
+
+model SummonHistory {
+  id                 Int        @id @default(autoincrement())
+  userId             String     @map("user_id")
+  user               User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  servantId          Int        @map("servant_id")
+  servant            Servant    @relation(fields: [servantId], references: [id])
+  poolId             Int        @map("pool_id")
+  pool               SummonPool @relation(fields: [poolId], references: [id])
+  catalystItemId     Int?       @map("catalyst_item_id")
+  /// "free" (summon semanal) ou "ticket"
+  source             String     @default("free")
+  isDuplicate        Boolean    @map("is_duplicate")
+  spiritOriginGained Int        @default(0) @map("spirit_origin_gained")
+  droppedItemId      Int?       @map("dropped_item_id")
+  /// Probabilidade do Servant sorteado no momento do summon (0..1)
+  probability        Float
+  createdAt          DateTime   @default(now()) @map("created_at")
+
+  @@index([userId, createdAt])
+  @@map("summon_history")
+}
+
+// ---------------------------------------------------------------------
+// Bond (V0.2) — recompensas por nível, data-driven
+// ---------------------------------------------------------------------
+
+enum BondRewardType {
+  COINS
+  SPIRIT_ORIGIN
+  ITEM
+  TITLE
+}
+
+model BondReward {
+  id        Int            @id @default(autoincrement())
+  /// null = vale para todos os Servants
+  servantId Int?           @map("servant_id")
+  servant   Servant?       @relation(fields: [servantId], references: [id], onDelete: Cascade)
+  level     Int
+  type      BondRewardType
+  amount    Int            @default(1)
+  itemId    Int?           @map("item_id")
+  item      Item?          @relation(fields: [itemId], references: [id])
+  /// Para TITLE: texto do título; aceita {servant}
+  title     String?
+
+  @@index([level])
+  @@map("bond_rewards")
+}
+
+model PlayerTitle {
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key        String
+  text       String
+  source     String   @default("")
+  obtainedAt DateTime @default(now()) @map("obtained_at")
+
+  @@id([userId, key])
+  @@map("player_titles")
+}
+
+// ---------------------------------------------------------------------
+// Missões PvE (V0.2) — expedições assíncronas
+// ---------------------------------------------------------------------
+
+model Mission {
+  id              Int     @id @default(autoincrement())
+  slug            String  @unique
+  name            String
+  emoji           String  @default("📜")
+  description     String  @default("")
+  difficulty      Int
+  durationMinutes Int     @map("duration_minutes")
+  minLevel        Int     @default(1) @map("min_level")
+  /// Peso de cada parâmetro no teste: { "strength": 1, "agility": 0.5 }
+  statWeights     Json    @default("{}") @map("stat_weights")
+  /// Bônus somado à chance por classe: { "assassin": 0.15 }
+  classBonus      Json    @default("{}") @map("class_bonus")
+  /// Bônus por trait: { "Dragon": 0.1 }
+  traitBonus      Json    @default("{}") @map("trait_bonus")
+  /// { xp, coins, bondXp, spiritOrigin, drops: [{ item, chance, quantity }] }
+  rewards         Json    @default("{}")
+  sortOrder       Int     @default(0) @map("sort_order")
+  enabled         Boolean @default(true)
+
+  runs PlayerMission[]
+
+  @@map("missions")
+}
+
+enum MissionStatus {
+  IN_PROGRESS
+  CLAIMED
+}
+
+model PlayerMission {
+  id              Int           @id @default(autoincrement())
+  userId          String        @map("user_id")
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  missionId       Int           @map("mission_id")
+  mission         Mission       @relation(fields: [missionId], references: [id])
+  playerServantId Int           @map("player_servant_id")
+  playerServant   PlayerServant @relation(fields: [playerServantId], references: [id], onDelete: Cascade)
+  status          MissionStatus @default(IN_PROGRESS)
+  /// Chance calculada no envio (0..1)
+  successChance   Float         @map("success_chance")
+  startedAt       DateTime      @default(now()) @map("started_at")
+  endsAt          DateTime      @map("ends_at")
+  /// GREAT_SUCCESS | SUCCESS | FAILURE — definido no resgate
+  outcome         String?
+  /// Recompensas efetivamente entregues
+  result          Json?
+  claimedAt       DateTime?     @map("claimed_at")
+
+  @@index([userId, status])
+  @@index([playerServantId, status])
+  @@map("player_missions")
+}
+
+// ---------------------------------------------------------------------
+// Loja (V0.2)
+// ---------------------------------------------------------------------
+
+enum Currency {
+  COINS
+  SPIRIT_ORIGIN
+}
+
+model ShopOffer {
+  id          Int      @id @default(autoincrement())
+  slug        String   @unique
+  itemId      Int      @map("item_id")
+  item        Item     @relation(fields: [itemId], references: [id])
+  currency    Currency
+  price       Int
+  /// Quantos itens vêm em cada compra
+  quantity    Int      @default(1)
+  /// Compras por jogador por semana (null = sem limite)
+  weeklyLimit Int?     @map("weekly_limit")
+  sortOrder   Int      @default(0) @map("sort_order")
+  enabled     Boolean  @default(true)
+
+  purchases ShopPurchase[]
+
+  @@map("shop_offers")
+}
+
+model ShopPurchase {
+  id         Int       @id @default(autoincrement())
+  userId     String    @map("user_id")
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  offerId    Int       @map("offer_id")
+  offer      ShopOffer @relation(fields: [offerId], references: [id])
+  quantity   Int
+  totalPrice Int       @map("total_price")
+  currency   Currency
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, offerId, createdAt])
+  @@map("shop_purchases")
+}
+
+// ---------------------------------------------------------------------
+// Guerra do Santo Graal (V0.3)
+// Estado da Guerra é SEPARADO do progresso permanente do jogador.
+// ---------------------------------------------------------------------
+
+enum WarStatus {
+  REGISTRATION
+  PREPARATION
+  ACTIVE
+  FINISHED
+  CANCELLED
+}
+
+model GrailWar {
+  id        Int       @id @default(autoincrement())
+  guildId   String    @map("guild_id")
+  /// Canal onde a crônica pública da Guerra é publicada
+  channelId String    @map("channel_id")
+  name      String
+  status    WarStatus @default(REGISTRATION)
+  paused    Boolean   @default(false)
+
+  minPlayers Int @default(2) @map("min_players")
+  maxPlayers Int @default(8) @map("max_players")
+  /// Template de mapa (src/content/maps.ts)
+  mapSlug    String @default("fuyuki") @map("map_slug")
+
+  registrationStart DateTime  @default(now()) @map("registration_start")
+  registrationEnd   DateTime? @map("registration_end")
+  startDate         DateTime? @map("start_date")
+  endDate           DateTime? @map("end_date")
+
+  currentDay   Int       @default(0) @map("current_day")
+  currentPhase String    @default("day") @map("current_phase")
+  nextDayAt    DateTime? @map("next_day_at")
+
+  winnerId    String?  @map("winner_id")
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  participants WarParticipant[]
+  locations    WarLocation[]
+  events       WarEvent[]
+  intel        PlayerIntel[]
+  battles      Battle[]
+  history      WarHistory?
+
+  @@index([guildId, status])
+  @@map("grail_wars")
+}
+
+model WarLocation {
+  id          Int      @id @default(autoincrement())
+  warId       Int      @map("war_id")
+  war         GrailWar @relation(fields: [warId], references: [id], onDelete: Cascade)
+  slug        String
+  name        String
+  emoji       String   @default("📍")
+  description String   @default("")
+  dangerLevel Int      @default(1) @map("danger_level")
+  /// Slugs das regiões conectadas (o mapa é um grafo)
+  connections String[]
+  /// Ex.: { "stealthBonus": 0.2, "investigationBonus": 0.1, "manaRegen": 10 }
+  effects     Json     @default("{}")
+
+  participants WarParticipant[]
+
+  @@unique([warId, slug])
+  @@map("war_locations")
+}
+
+model WarParticipant {
+  id        Int      @id @default(autoincrement())
+  warId     Int      @map("war_id")
+  war       GrailWar @relation(fields: [warId], references: [id], onDelete: Cascade)
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Servant contratado (da coleção permanente); nulo até o contrato
+  servantId Int?     @map("servant_id")
+  servant   Servant? @relation(fields: [servantId], references: [id])
+
+  currentHp Int @default(0) @map("current_hp")
+  maxHp     Int @default(0) @map("max_hp")
+  currentMp Int @default(0) @map("current_mp")
+  maxMp     Int @default(0) @map("max_mp")
+
+  commandSpells    Int          @default(3) @map("command_spells")
+  locationId       Int?         @map("location_id")
+  location         WarLocation? @relation(fields: [locationId], references: [id])
+  actionsRemaining Int          @default(0) @map("actions_remaining")
+
+  alive            Boolean @default(true)
+  identityRevealed Boolean @default(false) @map("identity_revealed")
+  /// Dia em que usou /hide (fica oculto até o fim desse dia)
+  hiddenOnDay      Int?    @map("hidden_on_day")
+  /// Acúmulos de /train, usados pelo combate (V0.4)
+  trainingStacks   Int     @default(0) @map("training_stacks")
+
+  kills       Int @default(0)
+  damageDealt Int @default(0) @map("damage_dealt")
+
+  joinedAt DateTime @default(now()) @map("joined_at")
+
+  battlesAsAttacker Battle[] @relation("BattleAttacker")
+  battlesAsDefender Battle[] @relation("BattleDefender")
+  intelAsObserver PlayerIntel[] @relation("IntelObserver")
+  intelAsTarget   PlayerIntel[] @relation("IntelTarget")
+  events          WarEvent[]
+
+  @@unique([warId, userId])
+  @@index([warId, locationId])
+  @@map("war_participants")
+}
+
+/// O que um Master sabe sobre outro — por observador, porque cada um sabe coisas diferentes
+model PlayerIntel {
+  id         Int            @id @default(autoincrement())
+  warId      Int            @map("war_id")
+  war        GrailWar       @relation(fields: [warId], references: [id], onDelete: Cascade)
+  observerId Int            @map("observer_id")
+  observer   WarParticipant @relation("IntelObserver", fields: [observerId], references: [id], onDelete: Cascade)
+  targetId   Int            @map("target_id")
+  target     WarParticipant @relation("IntelTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  /// 0 = conhece o Master · 1 = classe · 2 = STR/END/AGI · 3 = origem/era + MANA/LUCK · 4 = NP · 5 = identidade
+  informationLevel Int @default(0) @map("information_level")
+
+  lastSeenLocationId Int?     @map("last_seen_location_id")
+  lastSeenDay        Int?     @map("last_seen_day")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@unique([warId, observerId, targetId])
+  @@map("player_intel")
+}
+
+model WarEvent {
+  id            Int             @id @default(autoincrement())
+  warId         Int             @map("war_id")
+  war           GrailWar        @relation(fields: [warId], references: [id], onDelete: Cascade)
+  day           Int
+  type          String
+  /// Dono do evento privado (ou autor do público)
+  participantId Int?            @map("participant_id")
+  participant   WarParticipant? @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  isPublic      Boolean         @default(false) @map("is_public")
+  message       String
+  data          Json            @default("{}")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  announcedAt   DateTime?       @map("announced_at")
+
+  @@index([warId, isPublic, announcedAt])
+  @@index([participantId, createdAt])
+  @@map("war_events")
+}
+
+// ---------------------------------------------------------------------
+// Skills (V0.4) — data-driven
+// ---------------------------------------------------------------------
+
+model Skill {
+  id          Int     @id @default(autoincrement())
+  slug        String  @unique
+  name        String
+  description String  @default("")
+  cooldown    Int     @default(3)
+  manaCost    Int     @default(0) @map("mana_cost")
+  /// "self" | "enemy"
+  targetType  String  @default("self") @map("target_type")
+  /// Efeitos: [{ type: "buff", stat: "attack", value: 0.3, turns: 2 }, ...]
+  effects     Json    @default("[]")
+  enabled     Boolean @default(true)
+
+  servants ServantSkill[]
+
+  @@map("skills")
+}
+
+model ServantSkill {
+  servantId Int     @map("servant_id")
+  servant   Servant @relation(fields: [servantId], references: [id], onDelete: Cascade)
+  skillId   Int     @map("skill_id")
+  skill     Skill   @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  slot      Int
+
+  @@id([servantId, skillId])
+  @@map("servant_skills")
+}
+
+// ---------------------------------------------------------------------
+// Combate (V0.4) — 1 contra 1, por turnos, assíncrono
+// ---------------------------------------------------------------------
+
+enum BattleStatus {
+  ACTIVE
+  FINISHED
+}
+
+model Battle {
+  id         Int          @id @default(autoincrement())
+  warId      Int          @map("war_id")
+  war        GrailWar     @relation(fields: [warId], references: [id], onDelete: Cascade)
+  locationId Int?         @map("location_id")
+  status     BattleStatus @default(ACTIVE)
+  turn       Int          @default(1)
+
+  attackerId Int            @map("attacker_id")
+  attacker   WarParticipant @relation("BattleAttacker", fields: [attackerId], references: [id], onDelete: Cascade)
+  defenderId Int            @map("defender_id")
+  defender   WarParticipant @relation("BattleDefender", fields: [defenderId], references: [id], onDelete: Cascade)
+
+  /// Participante que deve agir agora
+  currentActorId Int      @map("current_actor_id")
+  turnDeadline   DateTime @map("turn_deadline")
+
+  /// Estado de combate de cada lado: buffs, cooldowns, defesa, atordoamento
+  attackerState Json @default("{}") @map("attacker_state")
+  defenderState Json @default("{}") @map("defender_state")
+
+  /// Últimas linhas do registro (para a mensagem pública)
+  log Json @default("[]")
+
+  channelId String? @map("channel_id")
+  messageId String? @map("message_id")
+
+  winnerId    Int?      @map("winner_id")
+  /// "KO" | "RETREAT" | "ESCAPE" | "CANCELLED"
+  endedReason String?   @map("ended_reason")
+  startedAt   DateTime  @default(now()) @map("started_at")
+  endedAt     DateTime? @map("ended_at")
+
+  actions BattleAction[]
+
+  @@index([warId, status])
+  @@index([status, turnDeadline])
+  @@map("battles")
+}
+
+model BattleAction {
+  id        Int      @id @default(autoincrement())
+  battleId  Int      @map("battle_id")
+  battle    Battle   @relation(fields: [battleId], references: [id], onDelete: Cascade)
+  turn      Int
+  actorId   Int      @map("actor_id")
+  /// ATTACK | SKILL | DEFEND | NP | COMMAND_SPELL | RETREAT | TIMEOUT
+  action    String
+  payload   Json     @default("{}")
+  damage    Int      @default(0)
+  result    String   @default("")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([battleId, turn])
+  @@map("battle_actions")
+}
+
+model WarHistory {
+  id           Int      @id @default(autoincrement())
+  warId        Int      @unique @map("war_id")
+  war          GrailWar @relation(fields: [warId], references: [id], onDelete: Cascade)
+  winnerId     String?  @map("winner_id")
+  servantId    Int?     @map("servant_id")
+  /// [{ userId, username, servant, kills, damageDealt, alive }]
+  participants Json
+  durationDays Int      @map("duration_days")
+  kills        Int      @default(0)
+  finishedAt   DateTime @default(now()) @map("finished_at")
+
+  @@map("war_history")
+}
+
+// ---------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------
+
+model ActionLog {
+  id        Int      @id @default(autoincrement())
+  userId    String?  @map("user_id")
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  payload   Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([action, createdAt])
+  @@index([userId, createdAt])
+  @@map("action_logs")
+}
